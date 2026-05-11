@@ -15,12 +15,13 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode M
 plt.rcParams['axes.unicode_minus'] = False
 
 
-def auto_downsample(volume, max_dim=256, min_dim=64, is_label=False):
+def auto_downsample(volume, max_dim=192, min_dim=64, is_label=False):
+    max_dim_for_memory = 192
     shape = volume.shape
     if max(shape) <= max_dim and min(shape) >= min_dim:
         return volume
 
-    scale_down = max_dim / max(shape) if max(shape) > max_dim else 1.0
+    scale_down = max_dim_for_memory / max(shape) if max(shape) > max_dim_for_memory else 1.0
     scale_up = min_dim / min(shape) if min(shape) < min_dim else 1.0
     
     if scale_up > 1.0:
@@ -267,11 +268,11 @@ with col_ctrl:
             t.write(raw_file.getvalue())
             tmp_path = t.name
         nii = nib.load(tmp_path)
-        raw_data = nii.get_fdata()
+        raw_data = nii.get_fdata(dtype=np.float32)
         zooms = nii.header.get_zooms()
 
         original_shape = raw_data.shape
-        raw_data = auto_downsample(raw_data, max_dim=256, min_dim=min_input_dim, is_label=False)
+        raw_data = auto_downsample(raw_data, max_dim=192, min_dim=min_input_dim, is_label=False)
         dims = raw_data.shape
         
         if original_shape != dims:
@@ -291,8 +292,8 @@ with col_ctrl:
             with tempfile.NamedTemporaryFile(delete=False, suffix='.nii.gz') as t:
                 t.write(gt_file.getvalue())
                 tmp_gt = t.name
-            gt_data = nib.load(tmp_gt).get_fdata()
-            gt_data = auto_downsample(gt_data, max_dim=256, min_dim=min_input_dim, is_label=True)
+            gt_data = nib.load(tmp_gt).get_fdata(dtype=np.float32)
+            gt_data = auto_downsample(gt_data, max_dim=192, min_dim=min_input_dim, is_label=True)
             os.remove(tmp_gt)
 
     run_btn = st.button("开始推理", type="primary", use_container_width=True,
