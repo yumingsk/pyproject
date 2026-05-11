@@ -45,6 +45,8 @@ env/
 *.npy
 *.nii
 *.nii.gz
+# But keep .gitkeep for directory structure
+!.gitkeep
 
 # Data directories
 data/

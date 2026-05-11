@@ -138,7 +138,7 @@ def test_all_case(net, ids_list, task, num_classes, patch_size, stride_xy, strid
         sitk.WriteImage(out, f'{test_save_path}/{data_id}.nii.gz')
 
 
-def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes):
+def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes, progress_callback=None, return_score_map=False):
     image = image[np.newaxis]
     _, dd, ww, hh = image.shape
     # print(image.shape)
@@ -158,6 +158,9 @@ def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes):
     sx = math.ceil((ww - patch_size[0]) / stride_xy) + 1
     sy = math.ceil((hh - patch_size[1]) / stride_xy) + 1
     sz = math.ceil((dd - patch_size[2]) / stride_z) + 1
+    
+    total_patches = sx * sy * sz
+    current_patch = 0
 
     score_map = np.zeros((num_classes,) + image.shape[1:4]).astype(np.float32)
     cnt = np.zeros(image.shape[1:4]).astype(np.float32)
@@ -188,13 +191,22 @@ def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes):
                 y = y.transpose(0, 3, 2, 1)
                 score_map[:, xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] += y
                 cnt[xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] += 1
+                
+                current_patch += 1
+                if progress_callback:
+                    progress_callback(current_patch / total_patches)
     # print("score_map", score_map.shape)
     # print("score_map", cnt.shape)
 
     score_map = score_map / np.expand_dims(cnt, axis=0)  # [Z, Y, X]
     score_map = score_map.transpose(0, 3, 2, 1)  # => [X, Y, Z]
     label_map = np.argmax(score_map, axis=0)
-    return label_map, score_map
+    
+    if return_score_map:
+        return label_map, score_map
+    else:
+        del score_map
+        return label_map, None
 
 
 def test_all_case_AB(net_A, net_B, ids_list, task, num_classes, patch_size, stride_xy, stride_z, test_save_path=None):
