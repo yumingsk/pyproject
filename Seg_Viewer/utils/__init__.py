@@ -295,16 +295,8 @@ def test_single_case_AB(net_A, net_B, image, stride_xy, stride_z, patch_size, nu
     image = image[np.newaxis]
     _, dd, ww, hh = image.shape
     print(image.shape)
-    # resize_shape=(patch_size[0]+patch_size[0]//4,
-    #               patch_size[1]+patch_size[1]//4,
-    #               patch_size[2]+patch_size[2]//4)
-
-    # image = torch.FloatTensor(image).unsqueeze(0)
-    # image = F.interpolate(image, size=resize_shape,mode='trilinear', align_corners=False)
-    # image = image.squeeze(0).numpy()
-
-    image = image.transpose(0, 3, 2, 1)  # <-- take care the shape
-    # print(image.shape)
+    
+    image = image.transpose(0, 3, 2, 1)
     patch_size = (patch_size[2], patch_size[1], patch_size[0])
     _, ww, hh, dd = image.shape
 
@@ -314,7 +306,9 @@ def test_single_case_AB(net_A, net_B, image, stride_xy, stride_z, patch_size, nu
 
     score_map = np.zeros((num_classes,) + image.shape[1:4]).astype(np.float32)
     cnt = np.zeros(image.shape[1:4]).astype(np.float32)
-    # print("score_map", score_map.shape)
+    
+    device = next(net_A.parameters()).device
+    
     for x in range(sx):
         xs = min(stride_xy * x, ww - patch_size[0])
         for y in range(sy):
@@ -322,24 +316,19 @@ def test_single_case_AB(net_A, net_B, image, stride_xy, stride_z, patch_size, nu
             for z in range(sz):
                 zs = min(stride_z * z, dd - patch_size[2])
                 test_patch = image[:, xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]]
-                # print("test", test_patch.shape)
                 test_patch = np.expand_dims(test_patch, axis=0).astype(np.float32)
-                test_patch = torch.from_numpy(test_patch).cuda()
-                # print("===",test_patch.size())
-                # <-- [1, 1, Z, Y, X] => [1, 1, X, Y, Z]
+                test_patch = torch.from_numpy(test_patch).to(device)
                 test_patch = test_patch.transpose(2, 4)
-                y1 = (net_A(test_patch) + net_B(test_patch)) / 2.0  # <--
-
-                y = F.softmax(y1, dim=1)  # <--
+                
+                y1 = (net_A(test_patch) + net_B(test_patch)) / 2.0
+                y = F.softmax(y1, dim=1)
                 y = y.cpu().data.numpy()
                 y = y[0, ...]
                 y = y.transpose(0, 3, 2, 1)
                 score_map[:, xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] += y
                 cnt[xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] += 1
-    # print("score_map", score_map.shape)
-    # print("score_map", cnt.shape)
 
-    score_map = score_map / np.expand_dims(cnt, axis=0)  # [Z, Y, X]
-    score_map = score_map.transpose(0, 3, 2, 1)  # => [X, Y, Z]
+    score_map = score_map / np.expand_dims(cnt, axis=0)
+    score_map = score_map.transpose(0, 3, 2, 1)
     label_map = np.argmax(score_map, axis=0)
     return label_map, score_map

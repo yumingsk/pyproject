@@ -43,8 +43,11 @@ def auto_downsample(volume, max_dim=256, min_dim=64, is_label=False):
 
 
 from models.SKCDF import VNet_Decouple_Attention_ABC
+from models.vnet import VNet
+from models.DHC.vnet_dst import VNet_Decoupled
+from models.DHC.vnet_flat import VNet as VNet_DHC
 from utils.config import Config
-from utils import test_single_case
+from utils import test_single_case, test_single_case_AB
 
 st.set_page_config(page_title="3D医学图像多模型对比工具", layout="wide")
 
@@ -94,18 +97,12 @@ DATASET_CONFIG = {
         "task": "synapse",
         "label_map": LABEL_MAP_SYNAPSE,
         "ckpt_dir": os.path.join(BASE_DIR, "ckpts", "synapse"),
-        "model_display_map": {
-            "BCP-SCKDF_synapse_20p.pth": "BCP-SCKDF 半监督模型",
-            "UR_SKCM_synapse_20p.pth": "UR-SKCM 模型",
-            "SKCDF_synapse_20p.pth": "SKCDF 注意力模型"
-        },
         "description": "MICCAI 2015 · 13个前景类别 · 30例CT扫描"
     },
     "AMOS": {
         "task": "amos",
         "label_map": LABEL_MAP_AMOS,
         "ckpt_dir": os.path.join(BASE_DIR, "ckpts", "amos"),
-        "model_display_map": {},
         "description": "MICCAI 2022 · 15个前景类别 · 360例CT扫描"
     }
 }
@@ -122,14 +119,38 @@ def get_model_list(ckpt_dir):
 
 @st.cache_resource(max_entries=2)
 def load_model_instance(model_name, _ckpt_dir, num_cls, n_filters=32):
-    model = VNet_Decouple_Attention_ABC(n_channels=1, n_classes=num_cls,
-                                        n_filters=n_filters, normalization='batchnorm', has_dropout=False)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_path = os.path.join(_ckpt_dir, model_name)
+    
     try:
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        model.to(device).eval()
-        return model, device
+        state_dict = torch.load(model_path, map_location=device, weights_only=False)
+        
+        if 'DHC' in model_name or 'dhc' in model_name:
+            if 'A' in state_dict and 'B' in state_dict:
+                model_A = VNet_DHC(n_channels=1, n_classes=num_cls, n_filters=n_filters, normalization='batchnorm', has_dropout=False)
+                model_B = VNet_DHC(n_channels=1, n_classes=num_cls, n_filters=n_filters, normalization='batchnorm', has_dropout=False)
+                
+                model_A.load_state_dict(state_dict['A'])
+                model_B.load_state_dict(state_dict['B'])
+                
+                model_A.to(device).eval()
+                model_B.to(device).eval()
+                
+                return (model_A, model_B), device
+            else:
+                st.error(f"模型 {model_name} 不是有效的DHC双模型格式")
+                return None, None
+        elif 'vnet' in model_name.lower() and 'attention' not in model_name.lower():
+            model = VNet(n_channels=1, n_classes=num_cls, n_filters=n_filters, normalization='batchnorm')
+            model.load_state_dict(state_dict)
+            model.to(device).eval()
+            return model, device
+        else:
+            model = VNet_Decouple_Attention_ABC(n_channels=1, n_classes=num_cls,
+                                                n_filters=n_filters, normalization='batchnorm', has_dropout=False)
+            model.load_state_dict(state_dict)
+            model.to(device).eval()
+            return model, device
     except Exception as e:
         st.error(f"模型 {model_name} 加载失败: {e}")
         return None, None
@@ -191,7 +212,6 @@ with col_ctrl:
     task_name = ds_cfg["task"]
     label_map = ds_cfg["label_map"]
     ckpt_dir = ds_cfg["ckpt_dir"]
-    model_display_map = ds_cfg["model_display_map"]
     config = Config(task_name)
 
     st.caption(f"{ds_cfg['description']}")
@@ -203,12 +223,18 @@ with col_ctrl:
         st.warning(f"未在 {ckpt_dir} 目录找到 .pth 文件")
         selected_display_names = []
     else:
-        name_to_file = {model_display_map.get(f, f): f for f in actual_files}
-        display_options = list(name_to_file.keys())
+        st.markdown("""
+        <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-weight: 600;">选择预测模型 (支持多选对比)</span>
+            <span title="命名规则：方法名_数据集_训练数据百分比.pth&#10;例如：BCP-SCKDF_synapse_20p.pth&#10;- 方法：BCP-SCKDF&#10;- 数据集：synapse&#10;- 训练数据：20%" style="cursor: help; font-size: 16px;">❓</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
         selected_display_names = st.multiselect(
             "选择预测模型 (支持多选对比)",
-            options=display_options,
-            default=[display_options[0]] if display_options else None
+            options=actual_files,
+            default=[actual_files[0]] if actual_files else None,
+            label_visibility="collapsed"
         )
 
     st.divider()
@@ -321,9 +347,8 @@ with col_main:
 
             total_models = len(selected_display_names)
 
-            for i, d_name in enumerate(selected_display_names):
-                f_name = name_to_file[d_name]
-                status_text.warning(f"正在加载模型 [{d_name}] ...")
+            for i, f_name in enumerate(selected_display_names):
+                status_text.warning(f"正在加载模型 [{f_name}] ...")
 
                 model_inst, device = load_model_instance(
                     f_name, _ckpt_dir=ckpt_dir, num_cls=config.num_cls, n_filters=config.n_filters
@@ -331,14 +356,21 @@ with col_main:
 
                 if model_inst:
                     status_text.warning(
-                        f"模型 [{d_name}] 推理中...\n(步长 {stride_xy}x{stride_xy}x{stride_z}，由于 3D 计算量极大，请耐心等待数十秒)")
+                        f"模型 [{f_name}] 推理中...\n(步长 {stride_xy}x{stride_xy}x{stride_z}，由于 3D 计算量极大，请耐心等待数十秒)")
 
                     with torch.no_grad():
-                        mask, _ = test_single_case(
-                            model_inst, img_tensor, stride_xy, stride_z,
-                            config.patch_size, config.num_cls
-                        )
-                        st.session_state["pred_results"][d_name] = mask.transpose(1, 2, 0)
+                        if isinstance(model_inst, tuple):
+                            model_A, model_B = model_inst
+                            mask, _ = test_single_case_AB(
+                                model_A, model_B, img_tensor, stride_xy, stride_z,
+                                config.patch_size, config.num_cls
+                            )
+                        else:
+                            mask, _ = test_single_case(
+                                model_inst, img_tensor, stride_xy, stride_z,
+                                config.patch_size, config.num_cls
+                            )
+                        st.session_state["pred_results"][f_name] = mask.transpose(1, 2, 0)
 
                     del mask
                     torch.cuda.empty_cache()
@@ -361,7 +393,7 @@ with col_main:
                 st.image(render_slice(disp_bg[:, :, idx_d], None, cmap, alpha, zooms[1] / zooms[0], False))
 
         if gt_data is not None:
-            with st.expander("专家标注 (Ground Truth)", expanded=True):
+            with st.expander("专家标注", expanded=True):
                 g1, g2, g3 = st.columns(3)
                 with g1:
                     render_title("专家标注 - 矢状面")
