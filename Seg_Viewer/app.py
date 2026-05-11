@@ -410,6 +410,7 @@ with col_main:
                         render_slice(disp_bg[:, :, idx_d], gt_data[:, :, idx_d], cmap, alpha, zooms[1] / zooms[0]))
 
         saved_preds = st.session_state.get("pred_results", {})
+        
         for d_name in selected_display_names:
             if d_name in saved_preds:
                 with st.expander(f"模型预测: {d_name}", expanded=True):
@@ -424,5 +425,37 @@ with col_main:
                     with p3:
                         render_title("预测模型 - 横断面")
                         st.image(render_slice(disp_bg[:, :, idx_d], p_mask[:, :, idx_d], cmap, alpha, zooms[1] / zooms[0]))
+        
+        if saved_preds and gt_data is not None:
+            st.divider()
+            st.subheader("📊 评价指标")
+            
+            st.warning("⚠️ **CPU模式下数值不准确，仅供参考。可用于模型之间的相对对比，但绝对值可能与GPU训练结果有差异。**")
+            
+            from utils.evaluation_metrics import evaluate_multiple_models_with_highlight
+            
+            label_names = {}
+            for en, info in label_map.items():
+                idx = list(label_map.keys()).index(en)
+                label_names[idx] = info['zh']
+            
+            result = evaluate_multiple_models_with_highlight(saved_preds, gt_data, config.num_cls, label_names)
+            
+            st.markdown("**🎯 DICE (%)** - 数值越大越好")
+            st.markdown(result['dice_df'].to_markdown(index=False))
+            
+            st.markdown("")
+            st.markdown("**📏 ASD (mm)** - 数值越小越好")
+            st.markdown(result['asd_df'].to_markdown(index=False))
+            
+            st.markdown("")
+            st.markdown("💡 **说明**: **加粗** 表示该器官的最优值。DICE最高为最优，ASD最低为最优。")
+            
+            with st.expander("📋 器官缩写对照表"):
+                organ_mapping = result['organ_mapping']
+                mapping_text = "| 缩写 | 全称 |\n|------|------|\n"
+                for abbr, full_name in organ_mapping.items():
+                    mapping_text += f"| {abbr} | {full_name} |\n"
+                st.markdown(mapping_text)
     else:
         st.info("请在左侧上传 NIfTI 格式的 CT 影像数据以开始分析。")
