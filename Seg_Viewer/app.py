@@ -200,93 +200,119 @@ col_ctrl, col_main = st.columns([1, 4])
 
 with col_ctrl:
     st.subheader("控制面板")
-
-    dataset_choice = st.radio(
-        "📂 选择数据集",
-        options=["Synapse", "AMOS"],
+    
+    inference_mode = st.radio(
+        "🖥️ 推理模式",
+        options=["本地CPU", "远程GPU"],
         index=0,
         horizontal=True,
-        help="Synapse: 13个前景类别 | AMOS: 15个前景类别(含十二指肠、膀胱、前列腺/子宫)"
+        help="本地CPU: 在本机运行，速度快但精度受限 | 远程GPU: 在远程服务器运行，精度高但需要网络连接"
     )
-
-    ds_cfg = DATASET_CONFIG[dataset_choice]
-    task_name = ds_cfg["task"]
-    label_map = ds_cfg["label_map"]
-    ckpt_dir = ds_cfg["ckpt_dir"]
-    config = Config(task_name)
-
-    st.caption(f"{ds_cfg['description']}")
-
-    st.divider()
-
-    actual_files = get_model_list(ckpt_dir)
-    if not actual_files:
-        st.warning(f"未在 {ckpt_dir} 目录找到 .pth 文件")
+    
+    st.session_state['inference_mode'] = inference_mode
+    
+    if inference_mode == "远程GPU":
+        st.divider()
+        from utils.remote_inference import render_gpu_inference_ui
+        render_gpu_inference_ui()
+        dataset_choice = "Synapse"
+        ds_cfg = DATASET_CONFIG[dataset_choice]
+        label_map = ds_cfg["label_map"]
+        raw_file = None
         selected_display_names = []
     else:
-        st.markdown("""
-        <div style="display: flex; align-items: center; gap: 8px;">
-            <span style="font-weight: 600;">选择预测模型 (支持多选对比)</span>
-            <span title="命名规则：方法名_数据集_训练数据百分比.pth&#10;例如：BCP-SCKDF_synapse_20p.pth&#10;- 方法：BCP-SCKDF&#10;- 数据集：synapse&#10;- 训练数据：20%" style="cursor: help; font-size: 16px;">❓</span>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        selected_display_names = st.multiselect(
-            "选择预测模型 (支持多选对比)",
-            options=actual_files,
-            default=[actual_files[0]] if actual_files else None,
-            label_visibility="collapsed"
+        dataset_choice = st.radio(
+            "📂 选择数据集",
+            options=["Synapse", "AMOS"],
+            index=0,
+            horizontal=True,
+            help="Synapse: 13个前景类别 | AMOS: 15个前景类别(含十二指肠、膀胱、前列腺/子宫)"
         )
 
-    st.divider()
-    st.markdown("**推理速度/精度调节**")
-    speed_mode = st.radio(
-        "滑动窗口步长 (影响推理耗时):",
-        options=["快速预览 (步长 64x64x32)", "均衡模式 (步长 48x48x24)", "极限精度 (步长 32x32x16 - 极慢)"],
-        index=0,
-        help="步长越小，推理越准但耗时倍增。大图片请务必选择'快速预览'！"
-    )
+        ds_cfg = DATASET_CONFIG[dataset_choice]
+        task_name = ds_cfg["task"]
+        label_map = ds_cfg["label_map"]
+        ckpt_dir = ds_cfg["ckpt_dir"]
+        config = Config(task_name)
 
-    if "快速" in speed_mode:
-        stride_xy, stride_z = 64, 32
-    elif "均衡" in speed_mode:
-        stride_xy, stride_z = 48, 24
-    else:
-        stride_xy, stride_z = 32, 16
+        st.caption(f"{ds_cfg['description']}")
 
-    st.divider()
-    raw_file = st.file_uploader("1. 上传 Raw CT (.nii.gz)", type=['nii', 'nii.gz'])
-    gt_file = st.file_uploader("2. 上传 Truth (.nii.gz) [可选]", type=['nii', 'nii.gz'])
-    alpha = st.slider("分割层透明度", 0.0, 1.0, 0.5)
+        st.divider()
 
-    raw_data, gt_data = None, None
-    zooms, dims = (1., 1., 1.), (1, 1, 1)
-    min_input_dim = 64
+        actual_files = get_model_list(ckpt_dir)
+        if not actual_files:
+            st.warning(f"未在 {ckpt_dir} 目录找到 .pth 文件")
+            selected_display_names = []
+        else:
+            st.markdown("""
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-weight: 600;">选择预测模型 (支持多选对比)</span>
+                <span title="命名规则：方法名_数据集_训练数据百分比.pth&#10;例如：BCP-SCKDF_synapse_20p.pth&#10;- 方法：BCP-SCKDF&#10;- 数据集：synapse&#10;- 训练数据：20%" style="cursor: help; font-size: 16px;">❓</span>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            selected_display_names = st.multiselect(
+                "选择预测模型 (支持多选对比)",
+                options=actual_files,
+                default=[actual_files[0]] if actual_files else None,
+                label_visibility="collapsed"
+            )
 
-    if raw_file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.nii.gz') as t:
-            t.write(raw_file.getvalue())
-            tmp_path = t.name
-        nii = nib.load(tmp_path)
-        raw_data = nii.get_fdata(dtype=np.float32)
-        zooms = nii.header.get_zooms()
+        st.divider()
+        st.markdown("**推理速度/精度调节**")
+        speed_mode = st.radio(
+            "滑动窗口步长 (影响推理耗时):",
+            options=["快速预览 (步长 64x64x32)", "均衡模式 (步长 48x48x24)", "极限精度 (步长 32x32x16 - 极慢)"],
+            index=0,
+            help="步长越小，推理越准但耗时倍增。大图片请务必选择'快速预览'！"
+        )
 
-        original_shape = raw_data.shape
-        raw_data = auto_downsample(raw_data, max_dim=192, min_dim=min_input_dim, is_label=False)
-        dims = raw_data.shape
-        
-        if original_shape != dims:
-            if min(original_shape) < min_input_dim:
-                st.toast(f"原图尺寸过小 {original_shape}，已自动上采样至 {dims} 以满足模型输入要求！")
-            else:
-                st.toast(f"原图过于庞大 {original_shape}，已自动降采样至 {dims} 以保障网页流畅度！")
+        if "快速" in speed_mode:
+            stride_xy, stride_z = 64, 32
+        elif "均衡" in speed_mode:
+            stride_xy, stride_z = 48, 24
+        else:
+            stride_xy, stride_z = 32, 16
 
-        os.remove(tmp_path)
+        st.divider()
+        raw_file = st.file_uploader("1. 上传 Raw CT (.nii.gz)", type=['nii', 'nii.gz'])
+        gt_file = st.file_uploader("2. 上传 Truth (.nii.gz) [可选]", type=['nii', 'nii.gz'])
+        alpha = st.slider("分割层透明度", 0.0, 1.0, 0.5)
+
+        raw_data, gt_data = None, None
+        zooms, dims = (1., 1., 1.), (1, 1, 1)
+        min_input_dim = 64
+
+        if raw_file:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.nii.gz') as t:
+                t.write(raw_file.getvalue())
+                tmp_path = t.name
+            nii = nib.load(tmp_path)
+            raw_data = nii.get_fdata(dtype=np.float32)
+            zooms = nii.header.get_zooms()
+
+            original_shape = raw_data.shape
+            raw_data = auto_downsample(raw_data, max_dim=192, min_dim=min_input_dim, is_label=False)
+            dims = raw_data.shape
+            
+            if original_shape != dims:
+                if min(original_shape) < min_input_dim:
+                    st.toast(f"原图尺寸过小 {original_shape}，已自动上采样至 {dims} 以满足模型输入要求！")
+                else:
+                    st.toast(f"原图过于庞大 {original_shape}，已自动降采样至 {dims} 以保障网页流畅度！")
+
+            os.remove(tmp_path)
 
         st.subheader("切片导航")
-        idx_w = st.slider("矢状面 (Sagittal)", 0, dims[0] - 1, dims[0] // 2)
-        idx_h = st.slider("冠状面 (Coronal)", 0, dims[1] - 1, dims[1] // 2)
-        idx_d = st.slider("横断面 (Axial)", 0, dims[2] - 1, dims[2] // 2)
+# 增加判断：只有在 dims 被正确赋值（即上传了CT）后，才渲染滑动条
+        if dims[0] > 1 and dims[1] > 1 and dims[2] > 1:
+            idx_w = st.slider("矢状面 (Sagittal)", 0, dims[0] - 1, dims[0] // 2)
+            idx_h = st.slider("冠状面 (Coronal)", 0, dims[1] - 1, dims[1] // 2)
+            idx_d = st.slider("横断面 (Axial)", 0, dims[2] - 1, dims[2] // 2)
+        else:
+    # 占位默认值，防止后续代码引用变量报错
+            idx_w, idx_h, idx_d = 0, 0, 0
+        st.info("📌 请先上传 Raw CT 图像以启用切片导航")
 
         if gt_file:
             with tempfile.NamedTemporaryFile(delete=False, suffix='.nii.gz') as t:
@@ -296,166 +322,170 @@ with col_ctrl:
             gt_data = auto_downsample(gt_data, max_dim=192, min_dim=min_input_dim, is_label=True)
             os.remove(tmp_gt)
 
-    run_btn = st.button("开始推理", type="primary", use_container_width=True,
-                        disabled=(not raw_file or not selected_display_names))
+        run_btn = st.button("开始推理", type="primary", use_container_width=True,
+                            disabled=(not raw_file or not selected_display_names))
 
 with col_main:
-    st.title("医学图像分割对比分析平台")
-
-    num_legend_cols = 8 if dataset_choice == "AMOS" else 7
-    legend_cols = st.columns(num_legend_cols)
-    for idx, (en, info) in enumerate(list(label_map.items())[1:]):
-        with legend_cols[idx % num_legend_cols]:
-            st.markdown(
-                f"<div style='border-left: 4px solid {info['color']}; padding-left:4px; font-size:11px;'>{info['zh']}</div>",
-                unsafe_allow_html=True)
-
-    if raw_file and raw_data is not None:
-        disp_bg = np.clip(raw_data, -125, 275)
-        disp_bg = (disp_bg - disp_bg.min()) / (disp_bg.max() - disp_bg.min() + 1e-8)
-        cmap = get_cmap(label_map)
-
-        if run_btn:
-            st.session_state["pred_results"] = {}
-            status_text = st.empty()
-            progress_bar = st.progress(0)
-
-            status_text.info("正在进行数据标准化...")
-            img_trans = raw_data.transpose(2, 0, 1)
-            img_norm = np.clip(img_trans, -75, 275)
-            img_norm = (img_norm - img_norm.min()) / (img_norm.max() - img_norm.min() + 1e-8)
-            img_tensor = img_norm.astype(np.float32)
-
-            min_sizes = config.patch_size
-            current_shape = img_tensor.shape
-            need_resize = False
-            new_shape = list(current_shape)
-            
-            for idx in range(3):
-                if current_shape[idx] < min_sizes[idx]:
-                    new_shape[idx] = min_sizes[idx]
-                    need_resize = True
-            
-            if need_resize:
-                status_text.info(f"输入尺寸 {current_shape} 小于模型要求 {min_sizes}，正在上采样...")
-                img_tensor = auto_downsample(
-                    img_tensor.transpose(1, 2, 0), 
-                    max_dim=max(new_shape), 
-                    min_dim=max(min_sizes), 
-                    is_label=False
-                ).transpose(2, 0, 1)
-                status_text.info(f"已上采样至 {img_tensor.shape}")
-
-            total_models = len(selected_display_names)
-
-            for i, f_name in enumerate(selected_display_names):
-                status_text.warning(f"正在加载模型 [{f_name}] ...")
-
-                model_inst, device = load_model_instance(
-                    f_name, _ckpt_dir=ckpt_dir, num_cls=config.num_cls, n_filters=config.n_filters
-                )
-
-                if model_inst:
-                    status_text.warning(
-                        f"模型 [{f_name}] 推理中...\n(步长 {stride_xy}x{stride_xy}x{stride_z}，由于 3D 计算量极大，请耐心等待数十秒)")
-
-                    with torch.no_grad():
-                        if isinstance(model_inst, tuple):
-                            model_A, model_B = model_inst
-                            mask, _ = test_single_case_AB(
-                                model_A, model_B, img_tensor, stride_xy, stride_z,
-                                config.patch_size, config.num_cls
-                            )
-                        else:
-                            mask, _ = test_single_case(
-                                model_inst, img_tensor, stride_xy, stride_z,
-                                config.patch_size, config.num_cls
-                            )
-                        st.session_state["pred_results"][f_name] = mask.transpose(1, 2, 0)
-
-                    del mask
-                    torch.cuda.empty_cache()
-                    gc.collect()
-
-                progress_bar.progress((i + 1) / total_models)
-
-            status_text.success("所有推理任务已完成！结果已渲染。")
-
-        with st.expander("原始 CT 图像", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                render_title("原始图像 - 矢状面 (Sagittal)")
-                st.image(render_slice(disp_bg[idx_w, :, :], None, cmap, alpha, zooms[2] / zooms[1], False))
-            with c2:
-                render_title("原始图像 - 冠状面 (Coronal)")
-                st.image(render_slice(disp_bg[:, idx_h, :], None, cmap, alpha, zooms[2] / zooms[0], False))
-            with c3:
-                render_title("原始图像 - 横断面 (Axial)")
-                st.image(render_slice(disp_bg[:, :, idx_d], None, cmap, alpha, zooms[1] / zooms[0], False))
-
-        if gt_data is not None:
-            with st.expander("专家标注", expanded=True):
-                g1, g2, g3 = st.columns(3)
-                with g1:
-                    render_title("专家标注 - 矢状面")
-                    st.image(
-                        render_slice(disp_bg[idx_w, :, :], gt_data[idx_w, :, :], cmap, alpha, zooms[2] / zooms[1]))
-                with g2:
-                    render_title("专家标注 - 冠状面")
-                    st.image(
-                        render_slice(disp_bg[:, idx_h, :], gt_data[:, idx_h, :], cmap, alpha, zooms[2] / zooms[0]))
-                with g3:
-                    render_title("专家标注 - 横断面")
-                    st.image(
-                        render_slice(disp_bg[:, :, idx_d], gt_data[:, :, idx_d], cmap, alpha, zooms[1] / zooms[0]))
-
-        saved_preds = st.session_state.get("pred_results", {})
-        
-        for d_name in selected_display_names:
-            if d_name in saved_preds:
-                with st.expander(f"模型预测: {d_name}", expanded=True):
-                    p_mask = saved_preds[d_name]
-                    p1, p2, p3 = st.columns(3)
-                    with p1:
-                        render_title("预测模型 - 矢状面")
-                        st.image(render_slice(disp_bg[idx_w, :, :], p_mask[idx_w, :, :], cmap, alpha, zooms[2] / zooms[1]))
-                    with p2:
-                        render_title("预测模型 - 冠状面")
-                        st.image(render_slice(disp_bg[:, idx_h, :], p_mask[:, idx_h, :], cmap, alpha, zooms[2] / zooms[0]))
-                    with p3:
-                        render_title("预测模型 - 横断面")
-                        st.image(render_slice(disp_bg[:, :, idx_d], p_mask[:, :, idx_d], cmap, alpha, zooms[1] / zooms[0]))
-        
-        if saved_preds and gt_data is not None:
-            st.divider()
-            st.subheader("📊 评价指标")
-            
-            st.warning("⚠️ **CPU模式下数值不准确，仅供参考。可用于模型之间的相对对比，但绝对值可能与GPU训练结果有差异。**")
-            
-            from utils.evaluation_metrics import evaluate_multiple_models_with_highlight
-            
-            label_names = {}
-            for en, info in label_map.items():
-                idx = list(label_map.keys()).index(en)
-                label_names[idx] = info['zh']
-            
-            result = evaluate_multiple_models_with_highlight(saved_preds, gt_data, config.num_cls, label_names)
-            
-            st.markdown("**🎯 DICE (%)** - 数值越大越好")
-            st.markdown(result['dice_df'].to_markdown(index=False))
-            
-            st.markdown("")
-            st.markdown("**📏 ASD (mm)** - 数值越小越好")
-            st.markdown(result['asd_df'].to_markdown(index=False))
-            
-            st.markdown("")
-            st.markdown("💡 **说明**: **加粗** 表示该器官的最优值。DICE最高为最优，ASD最低为最优。")
-            
-            with st.expander("📋 器官缩写对照表"):
-                organ_mapping = result['organ_mapping']
-                mapping_text = "| 缩写 | 全称 |\n|------|------|\n"
-                for abbr, full_name in organ_mapping.items():
-                    mapping_text += f"| {abbr} | {full_name} |\n"
-                st.markdown(mapping_text)
+    if st.session_state.get('inference_mode') == "远程GPU":
+        st.title("医学图像分割对比分析平台 - 远程GPU模式")
+        st.info("请在左侧控制面板中配置远程GPU连接并上传数据进行推理。")
     else:
-        st.info("请在左侧上传 NIfTI 格式的 CT 影像数据以开始分析。")
+        st.title("医学图像分割对比分析平台")
+
+        num_legend_cols = 8 if dataset_choice == "AMOS" else 7
+        legend_cols = st.columns(num_legend_cols)
+        for idx, (en, info) in enumerate(list(label_map.items())[1:]):
+            with legend_cols[idx % num_legend_cols]:
+                st.markdown(
+                    f"<div style='border-left: 4px solid {info['color']}; padding-left:4px; font-size:11px;'>{info['zh']}</div>",
+                    unsafe_allow_html=True)
+
+        if raw_file and raw_data is not None:
+            disp_bg = np.clip(raw_data, -125, 275)
+            disp_bg = (disp_bg - disp_bg.min()) / (disp_bg.max() - disp_bg.min() + 1e-8)
+            cmap = get_cmap(label_map)
+
+            if run_btn:
+                st.session_state["pred_results"] = {}
+                status_text = st.empty()
+                progress_bar = st.progress(0)
+
+                status_text.info("正在进行数据标准化...")
+                img_trans = raw_data.transpose(2, 0, 1)
+                img_norm = np.clip(img_trans, -75, 275)
+                img_norm = (img_norm - img_norm.min()) / (img_norm.max() - img_norm.min() + 1e-8)
+                img_tensor = img_norm.astype(np.float32)
+
+                min_sizes = config.patch_size
+                current_shape = img_tensor.shape
+                need_resize = False
+                new_shape = list(current_shape)
+                
+                for idx in range(3):
+                    if current_shape[idx] < min_sizes[idx]:
+                        new_shape[idx] = min_sizes[idx]
+                        need_resize = True
+                
+                if need_resize:
+                    status_text.info(f"输入尺寸 {current_shape} 小于模型要求 {min_sizes}，正在上采样...")
+                    img_tensor = auto_downsample(
+                        img_tensor.transpose(1, 2, 0), 
+                        max_dim=max(new_shape), 
+                        min_dim=max(min_sizes), 
+                        is_label=False
+                    ).transpose(2, 0, 1)
+                    status_text.info(f"已上采样至 {img_tensor.shape}")
+
+                total_models = len(selected_display_names)
+
+                for i, f_name in enumerate(selected_display_names):
+                    status_text.warning(f"正在加载模型 [{f_name}] ...")
+
+                    model_inst, device = load_model_instance(
+                        f_name, _ckpt_dir=ckpt_dir, num_cls=config.num_cls, n_filters=config.n_filters
+                    )
+
+                    if model_inst:
+                        status_text.warning(
+                            f"模型 [{f_name}] 推理中...\n(步长 {stride_xy}x{stride_xy}x{stride_z}，由于 3D 计算量极大，请耐心等待数十秒)")
+
+                        with torch.no_grad():
+                            if isinstance(model_inst, tuple):
+                                model_A, model_B = model_inst
+                                mask, _ = test_single_case_AB(
+                                    model_A, model_B, img_tensor, stride_xy, stride_z,
+                                    config.patch_size, config.num_cls
+                                )
+                            else:
+                                mask, _ = test_single_case(
+                                    model_inst, img_tensor, stride_xy, stride_z,
+                                    config.patch_size, config.num_cls
+                                )
+                            st.session_state["pred_results"][f_name] = mask.transpose(1, 2, 0)
+
+                            del mask
+                            torch.cuda.empty_cache()
+                            gc.collect()
+
+                    progress_bar.progress((i + 1) / total_models)
+
+                status_text.success("所有推理任务已完成！结果已渲染。")
+
+            with st.expander("原始 CT 图像", expanded=True):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    render_title("原始图像 - 矢状面 (Sagittal)")
+                    st.image(render_slice(disp_bg[idx_w, :, :], None, cmap, alpha, zooms[2] / zooms[1], False))
+                with c2:
+                    render_title("原始图像 - 冠状面 (Coronal)")
+                    st.image(render_slice(disp_bg[:, idx_h, :], None, cmap, alpha, zooms[2] / zooms[0], False))
+                with c3:
+                    render_title("原始图像 - 横断面 (Axial)")
+                    st.image(render_slice(disp_bg[:, :, idx_d], None, cmap, alpha, zooms[1] / zooms[0], False))
+
+            if gt_data is not None:
+                with st.expander("专家标注", expanded=True):
+                    g1, g2, g3 = st.columns(3)
+                    with g1:
+                        render_title("专家标注 - 矢状面")
+                        st.image(
+                            render_slice(disp_bg[idx_w, :, :], gt_data[idx_w, :, :], cmap, alpha, zooms[2] / zooms[1]))
+                    with g2:
+                        render_title("专家标注 - 冠状面")
+                        st.image(
+                            render_slice(disp_bg[:, idx_h, :], gt_data[:, idx_h, :], cmap, alpha, zooms[2] / zooms[0]))
+                    with g3:
+                        render_title("专家标注 - 横断面")
+                        st.image(
+                            render_slice(disp_bg[:, :, idx_d], gt_data[:, :, idx_d], cmap, alpha, zooms[1] / zooms[0]))
+
+            saved_preds = st.session_state.get("pred_results", {})
+            
+            for d_name in selected_display_names:
+                if d_name in saved_preds:
+                    with st.expander(f"模型预测: {d_name}", expanded=True):
+                        p_mask = saved_preds[d_name]
+                        p1, p2, p3 = st.columns(3)
+                        with p1:
+                            render_title("预测模型 - 矢状面")
+                            st.image(render_slice(disp_bg[idx_w, :, :], p_mask[idx_w, :, :], cmap, alpha, zooms[2] / zooms[1]))
+                        with p2:
+                            render_title("预测模型 - 冠状面")
+                            st.image(render_slice(disp_bg[:, idx_h, :], p_mask[:, idx_h, :], cmap, alpha, zooms[2] / zooms[0]))
+                        with p3:
+                            render_title("预测模型 - 横断面")
+                            st.image(render_slice(disp_bg[:, :, idx_d], p_mask[:, :, idx_d], cmap, alpha, zooms[1] / zooms[0]))
+            
+            if saved_preds and gt_data is not None:
+                st.divider()
+                st.subheader("📊 评价指标")
+                
+                st.warning("⚠️ **CPU模式下数值不准确，仅供参考。可用于模型之间的相对对比，但绝对值可能与GPU训练结果有差异。**")
+                
+                from utils.evaluation_metrics import evaluate_multiple_models_with_highlight
+                
+                label_names = {}
+                for en, info in label_map.items():
+                    idx = list(label_map.keys()).index(en)
+                    label_names[idx] = info['zh']
+                
+                result = evaluate_multiple_models_with_highlight(saved_preds, gt_data, config.num_cls, label_names)
+                
+                st.markdown("**🎯 DICE (%)** - 数值越大越好")
+                st.markdown(result['dice_df'].to_markdown(index=False))
+                
+                st.markdown("")
+                st.markdown("**📏 ASD (mm)** - 数值越小越好")
+                st.markdown(result['asd_df'].to_markdown(index=False))
+                
+                st.markdown("")
+                st.markdown("💡 **说明**: **加粗** 表示该器官的最优值。DICE最高为最优，ASD最低为最优。")
+                
+                with st.expander("📋 器官缩写对照表"):
+                    organ_mapping = result['organ_mapping']
+                    mapping_text = "| 缩写 | 全称 |\n|------|------|\n"
+                    for abbr, full_name in organ_mapping.items():
+                        mapping_text += f"| {abbr} | {full_name} |\n"
+                    st.markdown(mapping_text)
+        else:
+            st.info("请在左侧上传 NIfTI 格式的 CT 影像数据以开始分析。")
