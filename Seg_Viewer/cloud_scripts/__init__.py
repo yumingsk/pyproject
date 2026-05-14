@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 from utils.config import Config
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 def EMA(cur_weight, past_weight, momentum=0.9):
     new_weight = momentum * past_weight + (1 - momentum) * cur_weight
@@ -138,7 +138,7 @@ def test_all_case(net, ids_list, task, num_classes, patch_size, stride_xy, strid
         sitk.WriteImage(out, f'{test_save_path}/{data_id}.nii.gz')
 
 
-def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes, progress_callback=None, return_score_map=False):
+def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes):
     image = image[np.newaxis]
     _, dd, ww, hh = image.shape
     # print(image.shape)
@@ -158,9 +158,6 @@ def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes, p
     sx = math.ceil((ww - patch_size[0]) / stride_xy) + 1
     sy = math.ceil((hh - patch_size[1]) / stride_xy) + 1
     sz = math.ceil((dd - patch_size[2]) / stride_z) + 1
-    
-    total_patches = sx * sy * sz
-    current_patch = 0
 
     score_map = np.zeros((num_classes,) + image.shape[1:4]).astype(np.float32)
     cnt = np.zeros(image.shape[1:4]).astype(np.float32)
@@ -174,24 +171,13 @@ def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes, p
                 test_patch = image[:, xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]]
                 # print("test", test_patch.shape)
                 test_patch = np.expand_dims(test_patch, axis=0).astype(np.float32)
-                test_patch = torch.from_numpy(test_patch).to(device)
+                test_patch = torch.from_numpy(test_patch).cuda()
                 # print("===",test_patch.size())
                 # <-- [1, 1, Z, Y, X] => [1, 1, X, Y, Z]
                 test_patch = test_patch.transpose(2, 4)
 
                 # test_patch = net(test_patch,pred_type = "encoder")
-                
-                # 兼容不同模型：SKCDF需要pred_type参数，DHC/VNet不需要
-                try:
-                    y1, _ = net(test_patch, pred_type="unlabeled")  # SKCDF模型
-                except TypeError as e:
-                    if "pred_type" in str(e) or "unexpected keyword argument" in str(e):
-                        y1 = net(test_patch)  # DHC/VNet模型（无pred_type参数）
-                        if isinstance(y1, tuple):
-                            y1 = y1[0]  # 如果返回tuple，取第一个
-                    else:
-                        raise
-                
+                y1, _ = net(test_patch, pred_type="unlabeled")  # <--
                 # y1 = net(test_patch, pred_type="labeled")
                 # y1 = net(test_patch)
                 # y1,_ = net(test_patch, pred_type="labeled")
@@ -202,22 +188,13 @@ def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes, p
                 y = y.transpose(0, 3, 2, 1)
                 score_map[:, xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] += y
                 cnt[xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] += 1
-                
-                current_patch += 1
-                if progress_callback:
-                    progress_callback(current_patch / total_patches)
     # print("score_map", score_map.shape)
     # print("score_map", cnt.shape)
 
     score_map = score_map / np.expand_dims(cnt, axis=0)  # [Z, Y, X]
     score_map = score_map.transpose(0, 3, 2, 1)  # => [X, Y, Z]
     label_map = np.argmax(score_map, axis=0)
-    
-    if return_score_map:
-        return label_map, score_map
-    else:
-        del score_map
-        return label_map, None
+    return label_map, score_map
 
 
 def test_all_case_AB(net_A, net_B, ids_list, task, num_classes, patch_size, stride_xy, stride_z, test_save_path=None):
@@ -279,19 +256,13 @@ def test_single_case_AB_synapse(net_A, net_B, image, stride_xy, stride_z, patch_
                 # print("===",test_patch.size())
                 # <-- [1, 1, Z, Y, X] => [1, 1, X, Y, Z]
                 test_patch = test_patch.transpose(2, 4)
-                
-                # 兼容不同模型输出格式（处理tuple返回值）
-                out_A = net_A(test_patch)
-                out_B = net_B(test_patch)
-                
-                # 如果模型返回tuple，取第一个元素（主输出）
-                if isinstance(out_A, tuple):
-                    out_A = out_A[0]
-                if isinstance(out_B, tuple):
-                    out_B = out_B[0]
-                
-                y1 = (out_A + out_B) / 2.0
-                y = F.softmax(y1, dim=1)
+                y1 = (net_A(test_patch) + net_B(test_patch)) / 2.0  # <--
+                # y1 = net_A(test_patch, pred_type = "unlabeled")
+                # y1 = (net_A(test_patch, pred_type="unlabeled") + net_B(test_patch)) / 2.0
+                # y1 = net_B(test_patch)
+                # y1 = net_B(test_patch, pred_type="unlabeled")
+                # y1=net_B(test_patch)
+                y1 = F.softmax(y1, dim=1)  # <--
                 y1 = y1.cpu().data.numpy()
                 y1 = y1[0, ...]
                 y1 = y1.transpose(0, 3, 2, 1)
@@ -312,8 +283,16 @@ def test_single_case_AB(net_A, net_B, image, stride_xy, stride_z, patch_size, nu
     image = image[np.newaxis]
     _, dd, ww, hh = image.shape
     print(image.shape)
-    
-    image = image.transpose(0, 3, 2, 1)
+    # resize_shape=(patch_size[0]+patch_size[0]//4,
+    #               patch_size[1]+patch_size[1]//4,
+    #               patch_size[2]+patch_size[2]//4)
+
+    # image = torch.FloatTensor(image).unsqueeze(0)
+    # image = F.interpolate(image, size=resize_shape,mode='trilinear', align_corners=False)
+    # image = image.squeeze(0).numpy()
+
+    image = image.transpose(0, 3, 2, 1)  # <-- take care the shape
+    # print(image.shape)
     patch_size = (patch_size[2], patch_size[1], patch_size[0])
     _, ww, hh, dd = image.shape
 
@@ -323,9 +302,7 @@ def test_single_case_AB(net_A, net_B, image, stride_xy, stride_z, patch_size, nu
 
     score_map = np.zeros((num_classes,) + image.shape[1:4]).astype(np.float32)
     cnt = np.zeros(image.shape[1:4]).astype(np.float32)
-    
-    device = next(net_A.parameters()).device
-    
+    # print("score_map", score_map.shape)
     for x in range(sx):
         xs = min(stride_xy * x, ww - patch_size[0])
         for y in range(sy):
@@ -333,29 +310,24 @@ def test_single_case_AB(net_A, net_B, image, stride_xy, stride_z, patch_size, nu
             for z in range(sz):
                 zs = min(stride_z * z, dd - patch_size[2])
                 test_patch = image[:, xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]]
+                # print("test", test_patch.shape)
                 test_patch = np.expand_dims(test_patch, axis=0).astype(np.float32)
-                test_patch = torch.from_numpy(test_patch).to(device)
+                test_patch = torch.from_numpy(test_patch).cuda()
+                # print("===",test_patch.size())
+                # <-- [1, 1, Z, Y, X] => [1, 1, X, Y, Z]
                 test_patch = test_patch.transpose(2, 4)
-                
-                # 兼容不同模型输出格式（处理tuple返回值）
-                out_A = net_A(test_patch)
-                out_B = net_B(test_patch)
-                
-                # 如果模型返回tuple，取第一个元素（主输出）
-                if isinstance(out_A, tuple):
-                    out_A = out_A[0]
-                if isinstance(out_B, tuple):
-                    out_B = out_B[0]
-                
-                y1 = (out_A + out_B) / 2.0
-                y = F.softmax(y1, dim=1)
+                y1 = (net_A(test_patch) + net_B(test_patch)) / 2.0  # <--
+
+                y = F.softmax(y1, dim=1)  # <--
                 y = y.cpu().data.numpy()
                 y = y[0, ...]
                 y = y.transpose(0, 3, 2, 1)
                 score_map[:, xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] += y
                 cnt[xs:xs + patch_size[0], ys:ys + patch_size[1], zs:zs + patch_size[2]] += 1
+    # print("score_map", score_map.shape)
+    # print("score_map", cnt.shape)
 
-    score_map = score_map / np.expand_dims(cnt, axis=0)
-    score_map = score_map.transpose(0, 3, 2, 1)
+    score_map = score_map / np.expand_dims(cnt, axis=0)  # [Z, Y, X]
+    score_map = score_map.transpose(0, 3, 2, 1)  # => [X, Y, Z]
     label_map = np.argmax(score_map, axis=0)
     return label_map, score_map

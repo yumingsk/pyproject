@@ -10,6 +10,8 @@ import torch
 import torch.nn.functional as F
 import glob
 import gc
+import pandas as pd
+import re
 
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
 plt.rcParams['axes.unicode_minus'] = False
@@ -23,7 +25,7 @@ def auto_downsample(volume, max_dim=192, min_dim=64, is_label=False):
 
     scale_down = max_dim_for_memory / max(shape) if max(shape) > max_dim_for_memory else 1.0
     scale_up = min_dim / min(shape) if min(shape) < min_dim else 1.0
-    
+
     if scale_up > 1.0:
         scale = scale_up
     elif scale_down < 1.0:
@@ -122,21 +124,23 @@ def get_model_list(ckpt_dir):
 def load_model_instance(model_name, _ckpt_dir, num_cls, n_filters=32):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_path = os.path.join(_ckpt_dir, model_name)
-    
+
     try:
         state_dict = torch.load(model_path, map_location=device, weights_only=False)
-        
+
         if 'DHC' in model_name or 'dhc' in model_name:
             if 'A' in state_dict and 'B' in state_dict:
-                model_A = VNet_DHC(n_channels=1, n_classes=num_cls, n_filters=n_filters, normalization='batchnorm', has_dropout=False)
-                model_B = VNet_DHC(n_channels=1, n_classes=num_cls, n_filters=n_filters, normalization='batchnorm', has_dropout=False)
-                
+                model_A = VNet_DHC(n_channels=1, n_classes=num_cls, n_filters=n_filters, normalization='batchnorm',
+                                   has_dropout=False)
+                model_B = VNet_DHC(n_channels=1, n_classes=num_cls, n_filters=n_filters, normalization='batchnorm',
+                                   has_dropout=False)
+
                 model_A.load_state_dict(state_dict['A'])
                 model_B.load_state_dict(state_dict['B'])
-                
+
                 model_A.to(device).eval()
                 model_B.to(device).eval()
-                
+
                 return (model_A, model_B), device
             else:
                 st.error(f"模型 {model_name} 不是有效的DHC双模型格式")
@@ -166,11 +170,11 @@ def get_cmap(label_map):
 
 def render_slice(img_s, seg_s, cmap, alpha, aspect=1.0, show_seg=True):
     h, w = img_s.shape
-    
+
     base_size = 4.0
     fig_height = base_size
     fig_width = base_size * max(1.0, (w / h) * aspect)
-    
+
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=140)
     ax.imshow(img_s.T, cmap='gray', origin='lower', interpolation='bilinear', aspect='auto')
     if show_seg and seg_s is not None and np.any(seg_s > 0):
@@ -179,7 +183,7 @@ def render_slice(img_s, seg_s, cmap, alpha, aspect=1.0, show_seg=True):
                   origin='lower', interpolation='nearest', aspect='auto')
     ax.axis('off')
     plt.tight_layout(pad=0.02)
-    
+
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.01, dpi=140)
     buf.seek(0)
@@ -201,7 +205,7 @@ col_ctrl, col_main = st.columns([1, 4])
 
 with col_ctrl:
     st.subheader("控制面板")
-    
+
     inference_mode = st.radio(
         "🖥️ 推理模式",
         options=["本地CPU", "远程GPU"],
@@ -209,12 +213,13 @@ with col_ctrl:
         horizontal=True,
         help="本地CPU: 在本机运行，速度快但精度受限 | 远程GPU: 在远程服务器运行，精度高但需要网络连接"
     )
-    
+
     st.session_state['inference_mode'] = inference_mode
-    
+
     if inference_mode == "远程GPU":
         st.divider()
         from utils.remote_inference import render_gpu_inference_ui
+
         render_gpu_inference_ui()
         dataset_choice = "Synapse"
         ds_cfg = DATASET_CONFIG[dataset_choice]
@@ -251,7 +256,7 @@ with col_ctrl:
                 <span title="命名规则：方法名_数据集_训练数据百分比.pth&#10;例如：BCP-SCKDF_synapse_20p.pth&#10;- 方法：BCP-SCKDF&#10;- 数据集：synapse&#10;- 训练数据：20%" style="cursor: help; font-size: 16px;">❓</span>
             </div>
             """, unsafe_allow_html=True)
-            
+
             selected_display_names = st.multiselect(
                 "选择预测模型 (支持多选对比)",
                 options=actual_files,
@@ -295,7 +300,7 @@ with col_ctrl:
             original_shape = raw_data.shape
             raw_data = auto_downsample(raw_data, max_dim=192, min_dim=min_input_dim, is_label=False)
             dims = raw_data.shape
-            
+
             if original_shape != dims:
                 if min(original_shape) < min_input_dim:
                     st.toast(f"原图尺寸过小 {original_shape}，已自动上采样至 {dims} 以满足模型输入要求！")
@@ -305,15 +310,13 @@ with col_ctrl:
             os.remove(tmp_path)
 
         st.subheader("切片导航")
-# 增加判断：只有在 dims 被正确赋值（即上传了CT）后，才渲染滑动条
         if dims[0] > 1 and dims[1] > 1 and dims[2] > 1:
             idx_w = st.slider("矢状面 (Sagittal)", 0, dims[0] - 1, dims[0] // 2)
             idx_h = st.slider("冠状面 (Coronal)", 0, dims[1] - 1, dims[1] // 2)
             idx_d = st.slider("横断面 (Axial)", 0, dims[2] - 1, dims[2] // 2)
         else:
-    # 占位默认值，防止后续代码引用变量报错
             idx_w, idx_h, idx_d = 0, 0, 0
-        st.info("📌 请先上传 Raw CT 图像以启用切片导航")
+            st.info("📌 请先上传 Raw CT 图像以启用切片导航")
 
         if gt_file:
             with tempfile.NamedTemporaryFile(delete=False, suffix='.nii.gz') as t:
@@ -329,20 +332,20 @@ with col_ctrl:
 with col_main:
     if st.session_state.get('inference_mode') == "远程GPU":
         st.title("医学图像分割对比分析平台 - 远程GPU模式")
-        
+
         remote_raw_file = st.session_state.get('remote_raw_file')
         remote_gt_file = st.session_state.get('remote_gt_file')
         remote_pred_results = st.session_state.get("pred_results", {})
-        
+
         if remote_raw_file is not None:
             raw_data = nib.load(remote_raw_file).get_fdata(dtype=np.float32)
             dims = raw_data.shape
             disp_bg = np.clip(raw_data, -125, 275)
             disp_bg = (disp_bg - disp_bg.min()) / (disp_bg.max() - disp_bg.min() + 1e-8)
-            
+
             label_map = LABEL_MAP_SYNAPSE
             cmap = get_cmap(label_map)
-            
+
             num_legend_cols = 7
             legend_cols = st.columns(num_legend_cols)
             for idx, (en, info) in enumerate(list(label_map.items())[1:]):
@@ -350,15 +353,16 @@ with col_main:
                     st.markdown(
                         f"<div style='border-left: 4px solid {info['color']}; padding-left:4px; font-size:11px;'>{info['zh']}</div>",
                         unsafe_allow_html=True)
-            
+
             if dims[0] > 1 and dims[1] > 1 and dims[2] > 1:
                 zooms = (1., 1., 1.)
-                
-                st.subheader("切片导航")
-                idx_w = st.slider("矢状面 (Sagittal)", 0, dims[0] - 1, dims[0] // 2)
-                idx_h = st.slider("冠状面 (Coronal)", 0, dims[1] - 1, dims[1] // 2)
-                idx_d = st.slider("横断面 (Axial)", 0, dims[2] - 1, dims[2] // 2)
-                
+
+                gpu_slice = st.session_state.get('gpu_slice_idx', None)
+                if gpu_slice:
+                    idx_w, idx_h, idx_d = gpu_slice
+                else:
+                    idx_w, idx_h, idx_d = dims[0] // 2, dims[1] // 2, dims[2] // 2
+
                 with st.expander("原始 CT 图像", expanded=True):
                     c1, c2, c3 = st.columns([1.5, 1.5, 1])
                     with c1:
@@ -370,7 +374,7 @@ with col_main:
                     with c3:
                         render_title("横断面 (Axial)")
                         st.image(render_slice(disp_bg[:, :, idx_d], None, cmap, 0.5, zooms[1] / zooms[0], False))
-                
+
                 gt_data = None
                 if remote_gt_file:
                     gt_data = nib.load(remote_gt_file).get_fdata(dtype=np.float32)
@@ -383,17 +387,20 @@ with col_main:
                         g1, g2, g3 = st.columns([1.5, 1.5, 1])
                         with g1:
                             render_title("矢状面")
-                            st.image(render_slice(disp_bg[idx_w, :, :], gt_data[idx_w, :, :], cmap, 0.5, zooms[2] / zooms[1]))
+                            st.image(render_slice(disp_bg[idx_w, :, :], gt_data[idx_w, :, :], cmap, 0.5,
+                                                  zooms[2] / zooms[1]))
                         with g2:
                             render_title("冠状面")
-                            st.image(render_slice(disp_bg[:, idx_h, :], gt_data[:, idx_h, :], cmap, 0.5, zooms[2] / zooms[0]))
+                            st.image(render_slice(disp_bg[:, idx_h, :], gt_data[:, idx_h, :], cmap, 0.5,
+                                                  zooms[2] / zooms[0]))
                         with g3:
                             render_title("横断面")
-                            st.image(render_slice(disp_bg[:, :, idx_d], gt_data[:, :, idx_d], cmap, 0.5, zooms[1] / zooms[0]))
-                
+                            st.image(render_slice(disp_bg[:, :, idx_d], gt_data[:, :, idx_d], cmap, 0.5,
+                                                  zooms[1] / zooms[0]))
+
                 saved_preds = remote_pred_results
                 selected_display_names = list(saved_preds.keys())
-                
+
                 for d_name in selected_display_names:
                     if d_name in saved_preds:
                         p_mask = saved_preds[d_name]
@@ -407,27 +414,27 @@ with col_main:
                             p1, p2, p3 = st.columns([1.5, 1.5, 1])
                             with p1:
                                 render_title("矢状面")
-                                st.image(render_slice(disp_bg[idx_w, :, :], p_mask[idx_w, :, :], cmap, 0.5, zooms[2] / zooms[1]))
+                                st.image(render_slice(disp_bg[idx_w, :, :], p_mask[idx_w, :, :], cmap, 0.5,
+                                                      zooms[2] / zooms[1]))
                             with p2:
                                 render_title("冠状面")
-                                st.image(render_slice(disp_bg[:, idx_h, :], p_mask[:, idx_h, :], cmap, 0.5, zooms[2] / zooms[0]))
+                                st.image(render_slice(disp_bg[:, idx_h, :], p_mask[:, idx_h, :], cmap, 0.5,
+                                                      zooms[2] / zooms[0]))
                             with p3:
                                 render_title("横断面")
-                                st.image(render_slice(disp_bg[:, :, idx_d], p_mask[:, :, idx_d], cmap, 0.5, zooms[1] / zooms[0]))
+                                st.image(render_slice(disp_bg[:, :, idx_d], p_mask[:, :, idx_d], cmap, 0.5,
+                                                      zooms[1] / zooms[0]))
 
                 if saved_preds and gt_data is not None:
                     st.divider()
                     st.subheader("📊 云端评价指标 (全分辨率高精度)")
 
-                    import pandas as pd
-                    import re
-
-                    # 🛡️ 兼容不同的变量名，防止拿不到数据
                     cloud_logs = st.session_state.get('eval_results') or st.session_state.get('cloud_eval_logs') or {}
 
                     if cloud_logs:
-                        dice_data = []
-                        asd_data = []
+                        # 使用以器官为维度的字典：{"脾脏": {"Organ": "脾脏", "ModelA": 90, "ModelB": 91}}
+                        dice_dict = {}
+                        asd_dict = {}
 
                         cloud_to_zh = {
                             'spleen': '脾脏', 'right_kidney': '右肾', 'left_kidney': '左肾',
@@ -436,64 +443,74 @@ with col_main:
                             'portal_vein': '门静脉/脾静脉', 'pancreas': '胰腺',
                             'adrenal_gland_right': '右肾上腺', 'adrenal_gland_left': '左肾上腺',
                             'duodenum': '十二指肠', 'bladder': '膀胱', 'prostate_uterus': '前列腺/子宫',
-                            'average': 'Average'  # 使用小写做 key 增加鲁棒性
+                            'average': 'Average'
                         }
 
                         for m_name in selected_display_names:
                             if m_name in cloud_logs:
                                 eval_text = cloud_logs[m_name]
-                                dice_row = {'Model': m_name}
-                                asd_row = {'Model': m_name}
 
                                 for line in eval_text.split('\n'):
-                                    # 统一转为小写处理，防止匹配失败
                                     line_lower = line.lower()
                                     if ':' in line_lower and 'dice=' in line_lower and 'asd=' in line_lower:
                                         organ_eng = line_lower.split(':')[0].strip()
 
-                                        # 正则提取数字
                                         dice_match = re.search(r'dice=\s*([0-9.]+)', line_lower)
                                         asd_match = re.search(r'asd=\s*([0-9.]+|nan)', line_lower)
 
                                         if dice_match and asd_match and organ_eng in cloud_to_zh:
                                             zh_name = cloud_to_zh[organ_eng]
-                                            dice_row[zh_name] = float(dice_match.group(1))
 
+                                            if zh_name not in dice_dict:
+                                                dice_dict[zh_name] = {'器官': zh_name}
+                                                asd_dict[zh_name] = {'器官': zh_name}
+
+                                            dice_dict[zh_name][m_name] = float(dice_match.group(1))
                                             asd_str = asd_match.group(1)
-                                            asd_row[zh_name] = float('nan') if asd_str == 'nan' else float(asd_str)
+                                            asd_dict[zh_name][m_name] = float('nan') if asd_str == 'nan' else float(
+                                                asd_str)
 
-                                # 只要解析出至少一个器官的数据，就加入表格
-                                if len(dice_row) > 1:
-                                    dice_data.append(dice_row)
-                                    asd_data.append(asd_row)
+                        if dice_dict:
+                            dice_df = pd.DataFrame(list(dice_dict.values()))
+                            asd_df = pd.DataFrame(list(asd_dict.values()))
 
-                        if dice_data:
-                            dice_df = pd.DataFrame(dice_data)
-                            asd_df = pd.DataFrame(asd_data)
+                            dice_df = dice_df.rename(columns={'Organ': '器官'})
+                            asd_df = asd_df.rename(columns={'Organ': '器官'})
 
-                            # 调整列顺序，确保 Average 永远在最后一列
-                            if 'Average' in dice_df.columns:
-                                cols = [c for c in dice_df.columns if c != 'Average'] + ['Average']
-                                dice_df = dice_df[cols]
-                                asd_df = asd_df[cols]
+                            if 'Average' in dice_df['器官'].values:
+                                avg_row_dice = dice_df[dice_df['器官'] == 'Average']
+                                dice_df = dice_df[dice_df['器官'] != 'Average']
+                                dice_df = pd.concat([dice_df, avg_row_dice], ignore_index=True)
+
+                                avg_row_asd = asd_df[asd_df['器官'] == 'Average']
+                                asd_df = asd_df[asd_df['器官'] != 'Average']
+                                asd_df = pd.concat([asd_df, avg_row_asd], ignore_index=True)
 
 
-                            def bold_best(df, is_max=True):
+                            def bold_best_horizontal(df, is_max=True):
                                 df_out = df.copy()
-                                cols = [c for c in df.columns if c != 'Model']
-                                for col in cols:
-                                    if df[col].isnull().all():
-                                        continue
-                                    best_val = df[col].max() if is_max else df[col].min()
-                                    df_out[col] = df[col].apply(
-                                        lambda x: f"**{x:.2f}**" if x == best_val else (
-                                            f"{x:.2f}" if pd.notnull(x) else "NaN")
-                                    )
+                                model_cols = [c for c in df_out.columns if c != '器官']
+                                for col in model_cols:
+                                    df_out[col] = df_out[col].astype(str)
+                                for idx, row in df.iterrows():
+                                    vals = pd.to_numeric(row[model_cols], errors='coerce')
+                                    if vals.notnull().any():
+                                        best_val = vals.max() if is_max else vals.min()
+                                        for col in model_cols:
+                                            val_raw = row[col]
+                                            val = pd.to_numeric(val_raw, errors='coerce')
+                                            if pd.notnull(val) and not np.isnan(val):
+                                                if val == best_val:
+                                                    df_out.at[idx, col] = f"**{val:.2f}**"
+                                                else:
+                                                    df_out.at[idx, col] = f"{val:.2f}"
+                                            else:
+                                                df_out.at[idx, col] = "NaN"
                                 return df_out
 
 
-                            styled_dice = bold_best(dice_df, is_max=True)
-                            styled_asd = bold_best(asd_df, is_max=False)
+                            styled_dice = bold_best_horizontal(dice_df, is_max=True)
+                            styled_asd = bold_best_horizontal(asd_df, is_max=False)
 
                             st.markdown("**🎯 DICE (%)** - 数值越大越好")
                             st.markdown(styled_dice.to_markdown(index=False))
@@ -551,18 +568,18 @@ with col_main:
                 current_shape = img_tensor.shape
                 need_resize = False
                 new_shape = list(current_shape)
-                
+
                 for idx in range(3):
                     if current_shape[idx] < min_sizes[idx]:
                         new_shape[idx] = min_sizes[idx]
                         need_resize = True
-                
+
                 if need_resize:
                     status_text.info(f"输入尺寸 {current_shape} 小于模型要求 {min_sizes}，正在上采样...")
                     img_tensor = auto_downsample(
-                        img_tensor.transpose(1, 2, 0), 
-                        max_dim=max(new_shape), 
-                        min_dim=max(min_sizes), 
+                        img_tensor.transpose(1, 2, 0),
+                        max_dim=max(new_shape),
+                        min_dim=max(min_sizes),
                         is_label=False
                     ).transpose(2, 0, 1)
                     status_text.info(f"已上采样至 {img_tensor.shape}")
@@ -631,7 +648,7 @@ with col_main:
                             render_slice(disp_bg[:, :, idx_d], gt_data[:, :, idx_d], cmap, alpha, zooms[1] / zooms[0]))
 
             saved_preds = st.session_state.get("pred_results", {})
-            
+
             for d_name in selected_display_names:
                 if d_name in saved_preds:
                     with st.expander(f"模型预测: {d_name}", expanded=True):
@@ -639,13 +656,16 @@ with col_main:
                         p1, p2, p3 = st.columns([1.5, 1.5, 1])
                         with p1:
                             render_title("预测模型 - 矢状面")
-                            st.image(render_slice(disp_bg[idx_w, :, :], p_mask[idx_w, :, :], cmap, alpha, zooms[2] / zooms[1]))
+                            st.image(render_slice(disp_bg[idx_w, :, :], p_mask[idx_w, :, :], cmap, alpha,
+                                                  zooms[2] / zooms[1]))
                         with p2:
                             render_title("预测模型 - 冠状面")
-                            st.image(render_slice(disp_bg[:, idx_h, :], p_mask[:, idx_h, :], cmap, alpha, zooms[2] / zooms[0]))
+                            st.image(render_slice(disp_bg[:, idx_h, :], p_mask[:, idx_h, :], cmap, alpha,
+                                                  zooms[2] / zooms[0]))
                         with p3:
                             render_title("预测模型 - 横断面")
-                            st.image(render_slice(disp_bg[:, :, idx_d], p_mask[:, :, idx_d], cmap, alpha, zooms[1] / zooms[0]))
+                            st.image(render_slice(disp_bg[:, :, idx_d], p_mask[:, :, idx_d], cmap, alpha,
+                                                  zooms[1] / zooms[0]))
 
             if saved_preds and gt_data is not None:
                 st.divider()
@@ -658,26 +678,19 @@ with col_main:
                     idx = list(label_map.keys()).index(en)
                     label_names[idx] = info['zh']
 
-                # =========================================================
-                # 🛡️ 终极防御：创建一个全新的字典，绝不触碰和污染 session_state
-                # =========================================================
                 safe_eval_preds = {}
                 for m_name, pred in saved_preds.items():
-                    temp_pred = pred  # 拿出一个副本
+                    temp_pred = pred
                     if temp_pred.shape != gt_data.shape:
-                        # (147, 512, 512) -> (512, 512, 147)
                         if temp_pred.shape == (gt_data.shape[2], gt_data.shape[0], gt_data.shape[1]):
                             temp_pred = temp_pred.transpose(1, 2, 0)
                         elif temp_pred.shape == (gt_data.shape[1], gt_data.shape[2], gt_data.shape[0]):
                             temp_pred = temp_pred.transpose(2, 0, 1)
-                        elif temp_pred.shape == (gt_data.shape[2], gt_data.shape[1], gt_data.shape[0]):
+                        elif temp_pred.shape == (gt_data.shape[2], temp_pred.shape[1], temp_pred.shape[0]):
                             temp_pred = temp_pred.transpose(2, 1, 0)
 
-                    # 把对齐好的形状放进新字典
                     safe_eval_preds[m_name] = temp_pred
-                # =========================================================
 
-                # ⚠️ 关键点：这里传入的是 safe_eval_preds，而不是 saved_preds！
                 result = evaluate_multiple_models_with_highlight(safe_eval_preds, gt_data, 14, label_names)
 
                 st.markdown("**🎯 DICE (%)** - 数值越大越好")
@@ -689,7 +702,7 @@ with col_main:
 
                 st.markdown("")
                 st.markdown("💡 **说明**: **加粗** 表示该器官的最优值。DICE最高为最优，ASD最低为最优。")
-                
+
                 with st.expander("📋 器官缩写对照表"):
                     organ_mapping = result['organ_mapping']
                     mapping_text = "| 缩写 | 全称 |\n|------|------|\n"

@@ -330,20 +330,39 @@ def render_gpu_inference_ui():
     )
     
     alpha = st.slider("分割层透明度", 0.0, 1.0, 0.5)
-    
-    upload_info_col, run_btn_col = st.columns([3, 1])
-    with upload_info_col:
-        if raw_file:
-            size_mb = len(raw_file.getvalue()) / 1024 / 1024
-            st.info(f"📁 已选择: **{raw_file.name}** ({size_mb:.1f} MB) → `data/{dataset_type}/`")
-        else:
-            st.info("请上传 CT 图像文件 (.nii.gz)")
-    
-    with run_btn_col:
-        run_enabled = raw_file is not None and selected_models
-        run_text = "🚀 开始远程GPU预测" if run_enabled else "⏳ 请先上传图像并选择模型"
-        if st.button(run_text, use_container_width=True, disabled=not run_enabled, type="primary"):
-            run_remote_inference(raw_file, gt_file, selected_models, alpha, dataset_type)
+
+    if raw_file:
+        size_mb = len(raw_file.getvalue()) / 1024 / 1024
+        st.info(f"📁 已选择: **{raw_file.name}** ({size_mb:.1f} MB) → `data/{dataset_type}/`")
+
+        prev_file = st.session_state.get('remote_raw_name')
+        if prev_file != raw_file.name:
+            st.session_state['remote_raw_name'] = raw_file.name
+            st.session_state['pre_upload_done'] = False
+
+        if not st.session_state.get('pre_upload_done', False):
+            ssh_pre = create_ssh_client()
+            if ssh_pre:
+                with st.spinner(f"⏳ 预上传中 ({size_mb:.1f}MB)..."):
+                    try:
+                        r_path, _, skipped = smart_upload_to_server(
+                            ssh_pre, raw_file, dataset_type, "预上传"
+                        )
+                        st.session_state['pre_upload_remote_path'] = r_path
+                        st.session_state['pre_upload_done'] = True
+                    except Exception as e:
+                        st.warning(f"预上传失败，推理时重试: {e}")
+                    finally:
+                        ssh_pre.close()
+    else:
+        st.info("请上传 CT 图像文件 (.nii.gz)")
+        st.session_state['pre_upload_done'] = False
+
+    run_enabled = raw_file is not None and selected_models
+    run_text = "🚀 开始远程GPU预测" if run_enabled else "⏳ 请先上传图像并选择模型"
+    if st.button(run_text, type="primary", use_container_width=True,
+                disabled=(not raw_file or not selected_models)):
+        run_remote_inference(raw_file, gt_file, selected_models, alpha, dataset_type)
     
     inference_log = st.session_state.get('inference_log', [])
     if inference_log:
@@ -363,6 +382,31 @@ def render_gpu_inference_ui():
             if st.button("🗑️ 清除日志", use_container_width=True):
                 st.session_state.pop('inference_log', None)
                 st.rerun()
+    
+    remote_raw_file = st.session_state.get('remote_raw_file')
+    if remote_raw_file is not None:
+        st.divider()
+        st.subheader("切片导航")
+        
+        try:
+            import nibabel as nib
+            import numpy as np
+            
+            raw_data = nib.load(remote_raw_file).get_fdata(dtype=np.float32)
+            dims = raw_data.shape
+            
+            if dims[0] > 1 and dims[1] > 1 and dims[2] > 1:
+                idx_w = st.slider("矢状面 (Sagittal)", 0, dims[0] - 1, dims[0] // 2, key="gpu_sagittal")
+                idx_h = st.slider("冠状面 (Coronal)", 0, dims[1] - 1, dims[1] // 2, key="gpu_coronal")
+                idx_d = st.slider("横断面 (Axial)", 0, dims[2] - 1, dims[2] // 2, key="gpu_axial")
+                
+                st.session_state['gpu_slice_idx'] = (idx_w, idx_h, idx_d)
+            else:
+                st.warning("图像尺寸异常，无法启用切片导航")
+        except Exception as e:
+            st.error(f"加载切片导航失败: {e}")
+    else:
+        st.info("📌 请先上传并推理 CT 图像以启用切片导航")
 
 
 def save_uploaded_file(uploaded_file, suffix):
@@ -397,9 +441,14 @@ def run_remote_inference(raw_file, gt_file, selected_models, alpha, dataset_type
     try:
         status.update(label=f"📤 步骤1/4: 上传 CT 图像到 data/{dataset_type}/ ...")
 
-        remote_raw_path, raw_uploaded, raw_skipped = smart_upload_to_server(
-            ssh, raw_file, dataset_type, "Raw CT"
-        )
+        if st.session_state.get('pre_upload_done'):
+            remote_raw_path = st.session_state.get('pre_upload_remote_path', '')
+            log(f'⚡ 使用预上传文件，跳过传输', 'success')
+            raw_skipped = True
+        else:
+            remote_raw_path, raw_uploaded, raw_skipped = smart_upload_to_server(
+                ssh, raw_file, dataset_type, "Raw CT"
+            )
 
         remote_gt_path = None
         if gt_file:
@@ -428,69 +477,105 @@ def run_remote_inference(raw_file, gt_file, selected_models, alpha, dataset_type
 
         model_paths = st.session_state.get('server_model_paths', {})
         st.session_state['pred_results'] = {}
-        st.session_state['cloud_eval_logs'] = {}  # ⭐ 专门用来存放云端的打分文本
+        st.session_state['cloud_eval_logs'] = {}
         st.session_state['remote_pred_paths'] = {}
         progress_bar = st.progress(0)
+
+        input_basename = os.path.basename(remote_raw_path)
+        name, ext = os.path.splitext(input_basename)
+        if ext == '.gz':
+            name, _ = os.path.splitext(name)
+
+        local_cache_base = os.path.join(os.getcwd(), 'result')
+        os.makedirs(local_cache_base, exist_ok=True)
 
         for i, model_name in enumerate(selected_models):
             model_path = model_paths.get(model_name, '')
             safe_name = model_name.replace('.', '_').replace('-', '_')
-
-            input_basename = os.path.basename(remote_raw_path)
-            name, ext = os.path.splitext(input_basename)
-            if ext == '.gz':
-                name, _ = os.path.splitext(name)
             pred_filename = f'pred_{name}.nii.gz'
+            eval_filename = f'eval_{name}.txt'
+
+            local_model_dir = os.path.join(local_cache_base, safe_name)
+            local_pred_path = os.path.join(local_model_dir, pred_filename)
+            local_eval_path = os.path.join(local_model_dir, eval_filename)
 
             output_dir = f'/workspace/predictions/{safe_name}'
             output_nii = f'{output_dir}/{pred_filename}'
             remote_eval_log = f'{output_dir}/eval_result_{name}.txt'
 
-            # 确保云端存放预测结果的文件夹存在
             ssh.exec_command(f'mkdir -p {output_dir}')
+
+            # ======== 情况0：本地已有预测结果 + 评估结果 ========
+            if os.path.exists(local_pred_path) and os.path.exists(local_eval_path):
+                try:
+                    pred_data = nib.load(local_pred_path).get_fdata(dtype=np.float32).astype(np.int16)
+                    st.session_state['pred_results'][model_name] = pred_data
+                    with open(local_eval_path, 'r') as f:
+                        st.session_state['cloud_eval_logs'][model_name] = f.read()
+                    log(f'⚡ [{model_name}] 本地缓存命中，秒加载: {local_pred_path}', 'success')
+                    progress_bar.progress((i + 1) / len(selected_models))
+                    continue
+                except Exception as e:
+                    log(f'⚠️ [{model_name}] 本地缓存损坏，重新获取: {e}', 'warning')
 
             check_cmd = f'test -f {output_nii} && echo "EXISTS" || echo "NOT_EXISTS"'
             stdin, stdout, stderr = ssh.exec_command(check_cmd)
             exists_result = stdout.read().decode().strip()
 
-            # ======== 情景 A：云端已经存在预测结果 ========
+            # ======== 情况1：云端已存在 ========
             if exists_result == 'EXISTS':
-                log(f'✅ [{model_name}] 结果已存在，跳过推理: {output_nii}', 'success')
+                log(f'☁️ [{model_name}] 云端结果已存在: {output_nii}', 'info')
 
-                local_pred_path = os.path.join(tempfile.gettempdir(), f"pred_{safe_name}.nii.gz")
+                os.makedirs(local_model_dir, exist_ok=True)
                 sftp = ssh.open_sftp()
                 try:
                     sftp.get(output_nii, local_pred_path)
                     pred_data = nib.load(local_pred_path).get_fdata(dtype=np.float32).astype(np.int16)
                     st.session_state['pred_results'][model_name] = pred_data
                     st.session_state['remote_pred_paths'][model_name] = output_nii
-                    os.unlink(local_pred_path)
+                    log(f'📥 [{model_name}] 预测结果已缓存到本地: {local_pred_path}', 'success')
 
-                    # 既然结果存在，就单独补算一次评估指标
                     if gt_file and remote_gt_path:
-                        status.update(label=f'📊 运行评估 [{model_name}]...')
-                        eval_cmd = (
-                            f'source /opt/conda/etc/profile.d/conda.sh && conda activate base && '
-                            f'cd {work_dir} && '
-                            f'python evaluate_Ntimes.py '
-                            f'--task {dataset_type} '
-                            f'--pred {output_nii} '
-                            f'--label {remote_gt_path} | tee {remote_eval_log}'
-                        )
-                        stdin, stdout, stderr = ssh.exec_command(eval_cmd, timeout=120)
-                        eval_result = stdout.read().decode()
-                        log(f'[EVAL] 评估完成，结果已存入云端 {remote_eval_log}', 'info')
+                        eval_exists_cmd = f'test -f {remote_eval_log} && echo "EVAL_EXISTS" || echo "NO_EVAL"'
+                        stdin, stdout, stderr = ssh.exec_command(eval_exists_cmd)
+                        eval_check = stdout.read().decode().strip()
 
-                        st.session_state['cloud_eval_logs'][model_name] = eval_result
+                        if eval_check == 'EVAL_EXISTS' and os.path.exists(local_eval_path):
+                            with open(local_eval_path, 'r') as f:
+                                cached_eval = f.read()
+                            st.session_state['cloud_eval_logs'][model_name] = cached_eval
+                            log(f'⚡ [{model_name}] 评估结果已有，跳过运行', 'success')
+                        elif eval_check == 'EVAL_EXISTS':
+                            status.update(label=f'📊 下载评估 [{model_name}]...')
+                            sftp.get(remote_eval_log, local_eval_path)
+                            with open(local_eval_path, 'r') as f:
+                                eval_result = f.read()
+                            st.session_state['cloud_eval_logs'][model_name] = eval_result
+                            log(f'📥 [{model_name}] 评估结果已下载并缓存', 'success')
+                        else:
+                            status.update(label=f'📊 运行评估 [{model_name}]...')
+                            eval_cmd = (
+                                f'source /opt/conda/etc/profile.d/conda.sh && conda activate base && '
+                                f'cd {work_dir} && '
+                                f'python evaluate_Ntimes.py '
+                                f'--task {dataset_type} '
+                                f'--pred {output_nii} '
+                                f'--label {remote_gt_path} | tee {remote_eval_log}'
+                            )
+                            stdin, stdout, stderr = ssh.exec_command(eval_cmd, timeout=120)
+                            eval_result = stdout.read().decode()
+                            st.session_state['cloud_eval_logs'][model_name] = eval_result
+                            with open(local_eval_path, 'w') as f:
+                                f.write(eval_result)
+                            log(f'📥 [{model_name}] 评估完成并缓存到本地', 'success')
+
+                    progress_bar.progress((i + 1) / len(selected_models))
+                    sftp.close()
+                    continue
 
                 except Exception as e:
-                    log(f'⚠️ 下载缓存失败: {e}，将重新推理', 'warning')
-                    exists_result = 'NOT_EXISTS'
-                sftp.close()
-
-                if exists_result == 'EXISTS':
-                    progress_bar.progress((i + 1) / len(selected_models))
-                    continue
+                    log(f'⚠️ [{model_name}] 云端下载失败: {e}，将重新推理', 'warning')
+                    sftp.close()
 
             # ======== 情景 B：云端没有结果，需要跑模型 ========
             log(f'🖥️ 步骤3/4: 运行云端推理 [{model_name}]... ({i + 1}/{len(selected_models)})', 'info')
@@ -527,10 +612,27 @@ def run_remote_inference(raw_file, gt_file, selected_models, alpha, dataset_type
             if err:
                 log(f'[WARN] {err[:300]}', 'warning')
 
-            # 将打印出的评估指标存入字典
             if gt_file and remote_gt_path:
-                log(f'[EVAL] 评估完成，结果已存入云端 {remote_eval_log}', 'info')
-                st.session_state['cloud_eval_logs'][model_name] = cmd_output
+                eval_exists_cmd = f'test -f {remote_eval_log} && echo "EVAL_EXISTS" || echo "NO_EVAL"'
+                stdin, stdout, stderr = ssh.exec_command(eval_exists_cmd)
+                eval_check = stdout.read().decode().strip()
+
+                if eval_check == 'EVAL_EXISTS':
+                    sftp_read = ssh.open_sftp()
+                    try:
+                        sftp_read.get(remote_eval_log, local_eval_path)
+                        with open(local_eval_path, 'r') as f:
+                            eval_result = f.read()
+                        st.session_state['cloud_eval_logs'][model_name] = eval_result
+                        log(f'⚡ [{model_name}] 云端评估结果已存在，跳过重复计算', 'success')
+                    except Exception:
+                        st.session_state['cloud_eval_logs'][model_name] = cmd_output
+                        log(f'[EVAL] 评估完成', 'info')
+                    finally:
+                        sftp_read.close()
+                else:
+                    st.session_state['cloud_eval_logs'][model_name] = cmd_output
+                    log(f'[EVAL] 评估完成，结果已存入云端 {remote_eval_log}', 'info')
             else:
                 log(f'[INFER] 推理完成', 'info')
 
@@ -538,7 +640,7 @@ def run_remote_inference(raw_file, gt_file, selected_models, alpha, dataset_type
 
             log(f'📥 步骤4/4: 下载结果 [{model_name}]...', 'info')
 
-            local_pred_path = os.path.join(tempfile.gettempdir(), f"pred_{safe_name}.nii.gz")
+            os.makedirs(local_model_dir, exist_ok=True)
 
             sftp = ssh.open_sftp()
             try:
@@ -547,9 +649,12 @@ def run_remote_inference(raw_file, gt_file, selected_models, alpha, dataset_type
                 pred_data = nib.load(local_pred_path).get_fdata(dtype=np.float32).astype(np.int16)
                 st.session_state['pred_results'][model_name] = pred_data
                 st.session_state['remote_pred_paths'][model_name] = output_nii
+                log(f'✅ {model_name} 完成，已缓存到本地: {local_pred_path}', 'success')
 
-                os.unlink(local_pred_path)
-                log(f'✅ {model_name} 完成 (服务器路径: {output_nii})', 'success')
+                if gt_file and remote_gt_path and cmd_output:
+                    with open(local_eval_path, 'w') as f:
+                        f.write(cmd_output)
+                    log(f'📥 评估结果已缓存: {local_eval_path}', 'info')
 
             except FileNotFoundError:
                 log(f'❌ {model_name} 预测失败 - 未在云端找到生成的文件: {output_nii}', 'error')

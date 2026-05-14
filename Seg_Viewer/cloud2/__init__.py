@@ -181,16 +181,20 @@ def test_single_case(net, image, stride_xy, stride_z, patch_size, num_classes, p
 
                 # test_patch = net(test_patch,pred_type = "encoder")
                 
-                # 兼容不同模型：SKCDF需要pred_type参数，DHC/VNet不需要
+                y1 = None
                 try:
-                    y1, _ = net(test_patch, pred_type="unlabeled")  # SKCDF模型
-                except TypeError as e:
-                    if "pred_type" in str(e) or "unexpected keyword argument" in str(e):
-                        y1 = net(test_patch)  # DHC/VNet模型（无pred_type参数）
-                        if isinstance(y1, tuple):
-                            y1 = y1[0]  # 如果返回tuple，取第一个
-                    else:
-                        raise
+                    y1, _ = net(test_patch, pred_type="unlabeled")
+                except Exception:
+                    pass
+                if y1 is None:
+                    try:
+                        y1, _ = net(test_patch, pred_type="labeled")
+                    except Exception:
+                        pass
+                if y1 is None:
+                    y1 = net(test_patch)
+                    if isinstance(y1, tuple):
+                        y1 = y1[0]
                 
                 # y1 = net(test_patch, pred_type="labeled")
                 # y1 = net(test_patch)
