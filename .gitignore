@@ -1,18 +1,29 @@
-# Large medical imaging files
-*.nii.gz
-*.nii
-
-# OS files
-.DS_Store
-
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
 .eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
 *.egg
+
+# Virtual Environment
 .venv/
 venv/
+ENV/
 env/
 
 # IDE
@@ -20,3 +31,46 @@ env/
 .vscode/
 *.swp
 *.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Model weights and large files
+*.pth
+*.pt
+*.h5
+*.ckpt
+*.pkl
+*.npy
+*.nii
+*.nii.gz
+# But keep .gitkeep for directory structure
+!.gitkeep
+
+# Data directories
+data/
+datasets/
+ckpts/
+checkpoints/
+weights/
+
+# Logs and outputs
+logs/
+runs/
+output/
+results/
+predictions/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
