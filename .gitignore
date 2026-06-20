@@ -1,0 +1,22 @@
+# Large medical imaging files
+*.nii.gz
+*.nii
+
+# OS files
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
