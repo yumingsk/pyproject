@@ -1,0 +1,15 @@
+amos_0008.npz
+amos_0013.npz
+amos_0018.npz
+amos_0022.npz
+amos_0029.npz
+amos_0032.npz
+amos_0034.npz
+amos_0040.npz
+amos_0041.npz
+amos_0051.npz
+amos_0056.npz
+amos_0061.npz
+amos_0063.npz
+amos_0070.npz
+amos_0073.npz
